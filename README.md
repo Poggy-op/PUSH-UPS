@@ -1,2 +1,0 @@
-# PUSH-UPS
-Pushups tracker
