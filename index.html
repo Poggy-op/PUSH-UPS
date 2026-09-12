@@ -498,7 +498,7 @@
       ctx.clearRect(0,0,canvas.width, canvas.height);
       updateState('wait', 'FINDING YOU');
       if (performance.now() - lastGoodPoseAt > 1500){
-        showCoach('Make sure you\\'re fully in frame');
+        showCoach('Make sure your full body is in frame');
       }
     }
     requestAnimationFrame(loop);
