@@ -91,6 +91,50 @@
   }
   .setup-notes b{ color: var(--paper); }
 
+  .mode-select{
+    display:flex;
+    gap:6px;
+    margin-top: 34px;
+    background: rgba(242,236,224,0.06);
+    padding: 5px;
+    border-radius: 100px;
+    border: 1px solid rgba(242,236,224,0.1);
+  }
+  .mode-btn{
+    background:none;
+    border:none;
+    color: var(--paper-dim);
+    font-size: 14px;
+    font-weight: 600;
+    padding: 9px 20px;
+    border-radius: 100px;
+    cursor:pointer;
+  }
+  .mode-btn.active{
+    background: var(--ember);
+    color: #1A1206;
+  }
+  .mode-desc{
+    margin-top: 12px;
+    font-size: 13px;
+    color: var(--paper-dim);
+    min-height: 18px;
+    max-width: 300px;
+  }
+
+  .mode-pill{
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    padding: 2px 9px;
+    border-radius: 100px;
+    background: rgba(242,236,224,0.12);
+    margin-left: 6px;
+  }
+  .mode-pill.easy{ color: #2ED9C3; }
+  .mode-pill.medium{ color: #FF7A33; }
+  .mode-pill.hard{ color: #E14B4B; }
+
   #statusLine{
     margin-top: 22px;
     font-size: 14px;
@@ -119,9 +163,9 @@
   }
   #videoWrap{
     position:absolute; inset:0;
-    transform: scaleX(-1);
     overflow:hidden;
   }
+  #videoWrap.mirrored{ transform: scaleX(-1); }
   video, canvas{
     position:absolute; inset:0;
     width:100%; height:100%;
@@ -295,6 +339,14 @@
     <div class="kicker">CAMERA REP COUNTER</div>
     <h1 class="hero-count">PUSH<span>UP</span></h1>
     <p class="hero-sub">Prop your phone up facing you, get in plank position, and it'll count every rep as you drop and push back up.</p>
+
+    <div class="mode-select">
+      <button class="mode-btn" data-mode="easy">Easy</button>
+      <button class="mode-btn active" data-mode="medium">Medium</button>
+      <button class="mode-btn" data-mode="hard">Hard</button>
+    </div>
+    <div class="mode-desc" id="modeDesc">Standard pushup range — for regular training.</div>
+
     <button id="startBtn">Start Camera</button>
     <div class="setup-notes">
       <div><b>Distance:</b> whole body — shoulders to hips — should be visible</div>
@@ -306,13 +358,13 @@
 
   <!-- CAMERA SCREEN -->
   <div id="cameraScreen">
-    <div id="videoWrap">
+    <div id="videoWrap" class="mirrored">
       <video id="video" autoplay playsinline muted></video>
       <canvas id="overlay"></canvas>
     </div>
 
     <div class="hud-top">
-      <div class="pill"><span class="dot wait" id="stateDot"></span><span id="stateText">FINDING YOU</span></div>
+      <div class="pill"><span class="dot wait" id="stateDot"></span><span id="stateText">FINDING YOU</span><span class="mode-pill" id="modeBadge"></span></div>
       <div class="top-right">
         <button id="flipBtn">Flip 🔄</button>
         <button id="stopBtn">END</button>
@@ -366,6 +418,7 @@
   const resetBtn = document.getElementById('resetBtn');
   const statusLine = document.getElementById('statusLine');
   const video = document.getElementById('video');
+  const videoWrap = document.getElementById('videoWrap');
   const canvas = document.getElementById('overlay');
   const ctx = canvas.getContext('2d');
   const repCountEl = document.getElementById('repCount');
@@ -382,6 +435,37 @@
   const saveImgBtn = document.getElementById('saveImgBtn');
   const shareBtn = document.getElementById('shareBtn');
   const doneBtn = document.getElementById('doneBtn');
+  const modeBtns = document.querySelectorAll('.mode-btn');
+  const modeDesc = document.getElementById('modeDesc');
+  const modeBadge = document.getElementById('modeBadge');
+
+  let difficulty = 'medium';
+
+  // Per-mode rules:
+  // - downRatio/upRatio: how deep into the calibrated range of motion
+  //   counts as "down" / "up" (lower downRatio = must bend deeper;
+  //   higher upRatio = must extend further before it counts as up).
+  // - fallbackDown/fallbackUp: used before enough motion is calibrated.
+  // - checkForm: whether we evaluate back/hip alignment at all.
+  // - blockOnBadForm: whether a rep with bad form gets rejected (Hard)
+  //   or just flagged as a tip while still counting (Medium).
+  const MODES = {
+    easy:   { downRatio: 0.55, upRatio: 0.62, fallbackDown: 120, fallbackUp: 145, checkForm: false, blockOnBadForm: false,
+              desc: 'Knee pushups or a shallow bend are fine — good for building up.' },
+    medium: { downRatio: 0.35, upRatio: 0.72, fallbackDown: 95,  fallbackUp: 155, checkForm: true,  blockOnBadForm: false,
+              desc: 'Standard pushup range — for regular training.' },
+    hard:   { downRatio: 0.15, upRatio: 0.85, fallbackDown: 80,  fallbackUp: 165, checkForm: true,  blockOnBadForm: true,
+              desc: 'Full depth, full lockout, straight back — reps with bad form won\u2019t count.' }
+  };
+
+  modeBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      modeBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      difficulty = btn.dataset.mode;
+      modeDesc.textContent = MODES[difficulty].desc;
+    });
+  });
 
   let detector = null;
   let stream = null;
@@ -423,9 +507,6 @@
   });
 
   const CONF = 0.35;
-  // Fallback fixed thresholds, used only until we've auto-calibrated
-  const FALLBACK_DOWN = 95;
-  const FALLBACK_UP = 155;
 
   // Rolling window of recent angle readings, used to auto-calibrate
   // thresholds to whatever range of motion the camera actually sees.
@@ -440,8 +521,9 @@
   }
 
   function getThresholds(){
+    const cfg = MODES[difficulty];
     if (angleHistory.length < 20){
-      return { down: FALLBACK_DOWN, up: FALLBACK_UP };
+      return { down: cfg.fallbackDown, up: cfg.fallbackUp };
     }
     const min = Math.min(...angleHistory);
     const max = Math.max(...angleHistory);
@@ -449,11 +531,11 @@
     // Not enough movement observed yet to trust a calibrated range —
     // person is probably just holding plank, keep using fallback.
     if (range < 25){
-      return { down: FALLBACK_DOWN, up: FALLBACK_UP };
+      return { down: cfg.fallbackDown, up: cfg.fallbackUp };
     }
     return {
-      down: min + range * 0.35,
-      up: min + range * 0.72
+      down: min + range * cfg.downRatio,
+      up: min + range * cfg.upRatio
     };
   }
 
@@ -497,12 +579,14 @@
 
   async function flipCamera(){
     facingMode = facingMode === 'user' ? 'environment' : 'user';
+    videoWrap.classList.toggle('mirrored', facingMode === 'user');
     angleHistory.length = 0; // re-calibrate for the new view
     try{
       await setupCamera();
     } catch(err){
       // some devices only have one camera — flip back if it fails
       facingMode = facingMode === 'user' ? 'environment' : 'user';
+      videoWrap.classList.toggle('mirrored', facingMode === 'user');
       await setupCamera();
     }
   }
@@ -566,6 +650,36 @@
     }
   }
 
+  let repInvalid = false; // set true if form breaks down during the current rep
+
+  // Checks whether the body stays roughly straight (shoulder-hip-ankle in
+  // a line) instead of the hips sagging down or piking up. Returns null if
+  // we can't see enough of the body, otherwise a message describing the
+  // issue (or null if form looks fine).
+  function checkBackAlignment(pose){
+    const sides = [
+      { s: kp(pose,'left_shoulder'), h: kp(pose,'left_hip'), a: kp(pose,'left_ankle') },
+      { s: kp(pose,'right_shoulder'), h: kp(pose,'right_hip'), a: kp(pose,'right_ankle') }
+    ];
+    const side = sides.find(x => x.s && x.h && x.a);
+    if (!side) return null;
+
+    const { s, h, a } = side;
+    if (Math.abs(a.x - s.x) < 1) return null; // avoid divide-by-zero on a near-vertical read
+
+    const t = (h.x - s.x) / (a.x - s.x);
+    const expectedHipY = s.y + t * (a.y - s.y);
+    const bodyLength = Math.hypot(a.x - s.x, a.y - s.y);
+    if (bodyLength < 1) return null;
+
+    const deviation = (h.y - expectedHipY) / bodyLength; // positive = hips below the line (sag)
+    const THRESHOLD = 0.09;
+
+    if (deviation > THRESHOLD) return 'Kamar neeche mat girao — core tight rakho';
+    if (deviation < -THRESHOLD) return 'Hips zyada upar mat uthao — seedhi line banao';
+    return null;
+  }
+
   function processPose(pose){
     const lS = kp(pose,'left_shoulder'), lE = kp(pose,'left_elbow'), lW = kp(pose,'left_wrist');
     const rS = kp(pose,'right_shoulder'), rE = kp(pose,'right_elbow'), rW = kp(pose,'right_wrist');
@@ -588,22 +702,37 @@
       return;
     }
 
-    showCoach(null);
     lastGoodPoseAt = performance.now();
     pushAngleSample(angle);
+    const cfg = MODES[difficulty];
     const { down: downThresh, up: upThresh } = getThresholds();
+
+    let formMsg = null;
+    if (cfg.checkForm){
+      formMsg = checkBackAlignment(pose);
+      if (formMsg && stage === 'down'){
+        repInvalid = true;
+      }
+    }
+    showCoach(formMsg);
 
     if (angle < downThresh){
       if (stage !== 'down'){
         stage = 'down';
+        repInvalid = !!formMsg;
       }
       updateState('down', 'DOWN');
     } else if (angle > upThresh){
       if (stage === 'down'){
-        reps += 1;
-        repCountEl.textContent = String(reps);
+        if (cfg.blockOnBadForm && repInvalid){
+          showCoach('Rep count nahi hui — form theek karke dobara try karo');
+        } else {
+          reps += 1;
+          repCountEl.textContent = String(reps);
+        }
       }
       stage = 'up';
+      repInvalid = false;
       updateState('up', 'UP');
     } else {
       updateState(stage, stage === 'down' ? 'DOWN' : 'UP');
@@ -664,6 +793,8 @@
     running = true;
     sessionStartTime = Date.now();
     lastGoodPoseAt = performance.now();
+    modeBadge.textContent = difficulty.toUpperCase();
+    modeBadge.className = 'mode-pill ' + difficulty;
     await requestWakeLock();
     loop();
   }
@@ -691,6 +822,7 @@
     summaryReps.textContent = String(finalReps);
     summaryTime.textContent = formatDuration(durationMs);
     summaryDate.textContent = new Date().toLocaleDateString(undefined, { day:'numeric', month:'short', year:'numeric' });
+    summaryDate.textContent += ' · ' + difficulty.toUpperCase();
     summaryScreen.style.display = 'flex';
   }
 
@@ -782,6 +914,7 @@
   function resetToStart(){
     reps = 0;
     stage = null;
+    repInvalid = false;
     angleHistory.length = 0;
     repCountEl.textContent = '0';
     sessionStartTime = null;
@@ -800,6 +933,7 @@
   resetBtn.addEventListener('click', () => {
     reps = 0;
     stage = null;
+    repInvalid = false;
     angleHistory.length = 0;
     repCountEl.textContent = '0';
   });
