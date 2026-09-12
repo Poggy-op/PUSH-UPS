@@ -99,6 +99,17 @@
   }
   #statusLine.err{ color: var(--danger); }
 
+  .credit-footer{
+    position:absolute;
+    bottom: max(20px, env(safe-area-inset-bottom));
+    left:0; right:0;
+    text-align:center;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    color: var(--paper-dim);
+  }
+  .credit-footer b{ color: var(--ember); }
+
   /* ---------- CAMERA SCREEN ---------- */
   #cameraScreen{
     flex:1;
@@ -223,6 +234,56 @@
     animation: spin 0.8s linear infinite;
   }
   @keyframes spin{ to{ transform: rotate(360deg); } }
+
+  /* ---------- SUMMARY SCREEN ---------- */
+  #summaryScreen{
+    display:none;
+    flex:1;
+    flex-direction:column;
+    justify-content:center;
+    align-items:center;
+    padding: 8vh 8vw;
+    text-align:center;
+    background:
+      radial-gradient(circle at 50% 20%, rgba(46,217,195,0.14), transparent 55%),
+      var(--bg);
+  }
+  #summaryMeta{
+    margin-top: 18px;
+    font-size: 14px;
+    color: var(--paper-dim);
+    display:flex; align-items:center; gap:8px;
+  }
+  .meta-dot{ opacity:0.5; }
+  .summary-actions{
+    display:flex; flex-direction:column; gap:12px;
+    width:100%; max-width: 320px;
+    margin-top: 40px;
+  }
+  .summary-btn{
+    border-radius: 100px;
+    padding: 16px 20px;
+    font-size: 16px;
+    font-weight: 700;
+    cursor:pointer;
+    border: 1px solid rgba(242,236,224,0.2);
+    background: rgba(242,236,224,0.08);
+    color: var(--paper);
+  }
+  .summary-btn.primary{
+    background: var(--spark);
+    border: none;
+    color: #0B2A26;
+  }
+  .summary-btn:active{ transform: scale(0.97); }
+  #doneBtn.text-link{
+    margin-top: 26px;
+    background:none; border:none;
+    color: var(--paper-dim);
+    font-size: 14px;
+    text-decoration: underline;
+    cursor:pointer;
+  }
 </style>
 </head>
 <body>
@@ -240,6 +301,7 @@
       <div><b>Angle:</b> camera roughly side-on works best</div>
     </div>
     <div id="statusLine"></div>
+    <div class="credit-footer">Made by <b>POGGY</b> · @oppoggy</div>
   </div>
 
   <!-- CAMERA SCREEN -->
@@ -270,6 +332,23 @@
       <div style="font-size:14px; color:var(--paper-dim);">Loading pose model…</div>
     </div>
   </div>
+  <!-- SUMMARY SCREEN -->
+  <div id="summaryScreen">
+    <div class="kicker">SESSION COMPLETE</div>
+    <div class="hero-count" id="summaryReps">0</div>
+    <div id="summaryLabel" style="font-size:13px; letter-spacing:0.18em; color:var(--paper-dim); margin-top:-8px;">PUSHUPS</div>
+    <div id="summaryMeta">
+      <span id="summaryTime">0:00</span>
+      <span class="meta-dot">•</span>
+      <span id="summaryDate"></span>
+    </div>
+    <canvas id="shareCanvas" style="display:none;"></canvas>
+    <div class="summary-actions">
+      <button id="saveImgBtn" class="summary-btn primary">Save Image</button>
+      <button id="shareBtn" class="summary-btn">Share</button>
+    </div>
+    <button id="doneBtn" class="text-link">Done</button>
+  </div>
 
 </div>
 
@@ -295,6 +374,14 @@
   const loadingOverlay = document.getElementById('loadingOverlay');
   const coachMsg = document.getElementById('coachMsg');
   const flipBtn = document.getElementById('flipBtn');
+  const summaryScreen = document.getElementById('summaryScreen');
+  const summaryReps = document.getElementById('summaryReps');
+  const summaryTime = document.getElementById('summaryTime');
+  const summaryDate = document.getElementById('summaryDate');
+  const shareCanvas = document.getElementById('shareCanvas');
+  const saveImgBtn = document.getElementById('saveImgBtn');
+  const shareBtn = document.getElementById('shareBtn');
+  const doneBtn = document.getElementById('doneBtn');
 
   let detector = null;
   let stream = null;
@@ -303,6 +390,37 @@
   let stage = null; // 'up' | 'down'
   let lastGoodPoseAt = 0;
   let facingMode = 'user'; // 'user' = front camera, 'environment' = back camera
+  let wakeLock = null;
+  let sessionStartTime = null;
+
+  async function requestWakeLock(){
+    if (!('wakeLock' in navigator)) return; // not supported on this browser
+    try{
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => {
+        wakeLock = null;
+      });
+    } catch(err){
+      // e.g. low battery mode can reject this — fine, just skip silently
+      wakeLock = null;
+    }
+  }
+
+  async function releaseWakeLock(){
+    if (wakeLock){
+      try{ await wakeLock.release(); } catch(err){}
+      wakeLock = null;
+    }
+  }
+
+  // If the tab loses visibility (phone locked, app switched) the wake lock
+  // is auto-released by the browser. Re-acquire it when we come back,
+  // as long as the workout is still running.
+  document.addEventListener('visibilitychange', async () => {
+    if (running && document.visibilityState === 'visible' && !wakeLock){
+      await requestWakeLock();
+    }
+  });
 
   const CONF = 0.35;
   // Fallback fixed thresholds, used only until we've auto-calibrated
@@ -533,17 +651,130 @@
 
     loadingOverlay.style.display = 'none';
     running = true;
+    sessionStartTime = Date.now();
     lastGoodPoseAt = performance.now();
+    await requestWakeLock();
     loop();
+  }
+
+  function formatDuration(ms){
+    const totalSec = Math.max(0, Math.round(ms / 1000));
+    const mins = Math.floor(totalSec / 60);
+    const secs = totalSec % 60;
+    return mins + ':' + String(secs).padStart(2, '0');
   }
 
   function stop(){
     running = false;
+    releaseWakeLock();
     if (stream){
       stream.getTracks().forEach(t => t.stop());
       stream = null;
     }
+    const durationMs = sessionStartTime ? (Date.now() - sessionStartTime) : 0;
     cameraScreen.style.display = 'none';
+    showSummary(reps, durationMs);
+  }
+
+  function showSummary(finalReps, durationMs){
+    summaryReps.textContent = String(finalReps);
+    summaryTime.textContent = formatDuration(durationMs);
+    summaryDate.textContent = new Date().toLocaleDateString(undefined, { day:'numeric', month:'short', year:'numeric' });
+    summaryScreen.style.display = 'flex';
+  }
+
+  function drawSummaryCard(finalReps, timeLabel, dateLabel){
+    const W = 1080, H = 1350;
+    shareCanvas.width = W;
+    shareCanvas.height = H;
+    const c = shareCanvas.getContext('2d');
+
+    // background
+    const grad = c.createRadialGradient(W/2, H*0.28, 50, W/2, H*0.28, W*0.8);
+    grad.addColorStop(0, '#241f16');
+    grad.addColorStop(1, '#17140F');
+    c.fillStyle = grad;
+    c.fillRect(0, 0, W, H);
+
+    // kicker
+    c.fillStyle = '#2ED9C3';
+    c.font = '600 28px Inter, sans-serif';
+    c.textAlign = 'center';
+    c.fillText('SESSION COMPLETE', W/2, 220);
+
+    // big rep number
+    c.fillStyle = '#F2ECE0';
+    c.font = '900 340px Arial Black, Helvetica Neue, sans-serif';
+    c.fillText(String(finalReps), W/2, 620);
+
+    // label
+    c.fillStyle = '#A79E8C';
+    c.font = '600 34px Inter, sans-serif';
+    c.fillText('PUSHUPS', W/2, 690);
+
+    // meta line
+    c.fillStyle = '#F2ECE0';
+    c.font = '500 32px Inter, sans-serif';
+    c.fillText(timeLabel + '   •   ' + dateLabel, W/2, 800);
+
+    // footer branding
+    c.fillStyle = '#FF7A33';
+    c.font = '800 40px Inter, sans-serif';
+    c.fillText('POGGY', W/2, H - 130);
+    c.fillStyle = '#A79E8C';
+    c.font = '500 28px Inter, sans-serif';
+    c.fillText('@oppoggy', W/2, H - 85);
+
+    return shareCanvas;
+  }
+
+  function canvasToBlob(canvas){
+    return new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+  }
+
+  async function saveImage(){
+    drawSummaryCard(summaryReps.textContent, summaryTime.textContent, summaryDate.textContent);
+    const blob = await canvasToBlob(shareCanvas);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'pushups-' + summaryReps.textContent + '-' + Date.now() + '.png';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  async function shareImage(){
+    drawSummaryCard(summaryReps.textContent, summaryTime.textContent, summaryDate.textContent);
+    const blob = await canvasToBlob(shareCanvas);
+    const fileName = 'pushups-' + summaryReps.textContent + '.png';
+    const file = new File([blob], fileName, { type: 'image/png' });
+    const shareText = summaryReps.textContent + ' pushups done 💪';
+
+    if (navigator.canShare && navigator.canShare({ files: [file] })){
+      try{
+        await navigator.share({ files: [file], title: 'Pushup session', text: shareText });
+        return;
+      } catch(err){
+        // user cancelled share sheet — nothing to do
+        return;
+      }
+    }
+    if (navigator.share){
+      try{ await navigator.share({ title: 'Pushup session', text: shareText }); return; } catch(err){ return; }
+    }
+    // fallback: no share API support — just save the image instead
+    saveImage();
+  }
+
+  function resetToStart(){
+    reps = 0;
+    stage = null;
+    angleHistory.length = 0;
+    repCountEl.textContent = '0';
+    sessionStartTime = null;
+    summaryScreen.style.display = 'none';
     startScreen.style.display = 'flex';
     startBtn.disabled = false;
     setStatus('');
@@ -552,6 +783,9 @@
   startBtn.addEventListener('click', start);
   stopBtn.addEventListener('click', stop);
   flipBtn.addEventListener('click', flipCamera);
+  saveImgBtn.addEventListener('click', saveImage);
+  shareBtn.addEventListener('click', shareImage);
+  doneBtn.addEventListener('click', resetToStart);
   resetBtn.addEventListener('click', () => {
     reps = 0;
     stage = null;
