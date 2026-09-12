@@ -485,7 +485,7 @@
       stream.getTracks().forEach(t => t.stop());
     }
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+      video: { facingMode: facingMode, width: { ideal: 640 }, height: { ideal: 480 } },
       audio: false
     });
     video.srcObject = stream;
@@ -508,11 +508,15 @@
   }
 
   async function loadModel(){
+    tf.enableProdMode(); // skips internal safety checks tf.js does in dev mode
     await tf.setBackend('webgl');
     await tf.ready();
+    // Lower-precision textures — noticeably faster on weaker mobile GPUs,
+    // with no visible accuracy loss for this use case.
+    tf.env().set('WEBGL_FORCE_F16_TEXTURES', true);
     detector = await poseDetection.createDetector(
       poseDetection.SupportedModels.MoveNet,
-      { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING }
+      { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING, enableSmoothing: true }
     );
   }
 
@@ -606,17 +610,24 @@
     }
   }
 
+  let lastInferenceTime = 0;
+  const INFERENCE_INTERVAL_MS = 55; // ~18 inferences/sec — plenty for pushup speed, much lighter on weak phones
+
   async function loop(){
     if (!running) return;
-    const poses = await detector.estimatePoses(video, { flipHorizontal: false });
-    if (poses && poses.length > 0){
-      drawSkeleton(poses[0]);
-      processPose(poses[0]);
-    } else {
-      ctx.clearRect(0,0,canvas.width, canvas.height);
-      updateState('wait', 'FINDING YOU');
-      if (performance.now() - lastGoodPoseAt > 1500){
-        showCoach('Make sure your full body is in frame');
+    const now = performance.now();
+    if (now - lastInferenceTime >= INFERENCE_INTERVAL_MS){
+      lastInferenceTime = now;
+      const poses = await detector.estimatePoses(video, { flipHorizontal: false });
+      if (poses && poses.length > 0){
+        drawSkeleton(poses[0]);
+        processPose(poses[0]);
+      } else {
+        ctx.clearRect(0,0,canvas.width, canvas.height);
+        updateState('wait', 'FINDING YOU');
+        if (performance.now() - lastGoodPoseAt > 1500){
+          showCoach('Make sure your full body is in frame');
+        }
       }
     }
     requestAnimationFrame(loop);
